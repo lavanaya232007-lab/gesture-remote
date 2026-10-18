@@ -1,6 +1,6 @@
 """Gesture remote: control volume and brightness with hand gestures.
 
-Current step: show the webcam preview with hand landmarks drawn on top.
+Current step: webcam preview with hand landmarks and a Left/Right label per hand.
 """
 
 import time
@@ -14,6 +14,11 @@ from mediapipe.tasks.python import BaseOptions, vision
 CAMERA_INDEX = 0  # 0 = the laptop's built-in webcam
 MODEL_PATH = Path(__file__).parent / "models" / "hand_landmarker.task"
 WINDOW_NAME = "Gesture Remote"
+
+# MediaPipe's Left/Right guess assumes a normal (un-mirrored) camera image. We mirror
+# the image before detection, so its guess comes out backwards; True swaps it back.
+# Verified on this laptop: without the swap, the real right hand was labeled "Left".
+SWAP_HANDEDNESS = True
 
 
 def create_hand_landmarker():
@@ -35,6 +40,24 @@ def draw_hand(frame, landmarks):
         vision.drawing_styles.get_default_hand_landmarks_style(),
         vision.drawing_styles.get_default_hand_connections_style(),
     )
+
+
+def real_hand_label(handedness):
+    """Return "Left" or "Right" for your real hand, using MediaPipe's best guess."""
+    label = handedness[0].category_name
+    if SWAP_HANDEDNESS:
+        label = "Left" if label == "Right" else "Right"
+    return label
+
+
+def draw_label(frame, landmarks, label):
+    """Write the hand's Left/Right label just above the hand."""
+    height, width = frame.shape[:2]
+    # Landmark x/y are fractions (0.0 to 1.0) of the image size, so convert to pixels.
+    x = int(min(lm.x for lm in landmarks) * width)
+    y = int(min(lm.y for lm in landmarks) * height) - 15
+    y = max(y, 30)  # keep the text inside the window
+    cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
 
 def main():
@@ -68,8 +91,10 @@ def main():
             last_timestamp_ms = timestamp_ms
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            for landmarks in result.hand_landmarks:
+            # handedness[i] holds MediaPipe's guesses for hand i; the first is the best one.
+            for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
                 draw_hand(frame, landmarks)
+                draw_label(frame, landmarks, real_hand_label(handedness))
 
             cv2.imshow(WINDOW_NAME, frame)
             key = cv2.waitKey(1) & 0xFF
