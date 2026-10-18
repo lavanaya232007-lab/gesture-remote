@@ -1,0 +1,7 @@
+# Tested on Python 3.13.1, Windows 11.
+# Do NOT also install opencv-python: mediapipe already uses opencv-contrib-python,
+# and having both installed breaks "import cv2".
+mediapipe==1.1.1
+opencv-contrib-python==5.0.0.93
+pycaw==20260927
+screen-brightness-control==0.27.2

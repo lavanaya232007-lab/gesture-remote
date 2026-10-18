@@ -1,0 +1,9 @@
+# Virtual environment (recreate with: python -m venv .venv)
+.venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# MediaPipe model file (large binary, download instructions are in README.md)
+models/*.task
