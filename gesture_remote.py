@@ -1,8 +1,9 @@
 """Gesture remote: control volume and brightness with hand gestures.
 
-Current step: webcam preview with hand landmarks and a Left/Right label per hand.
+Current step: show the pinch ratio of each hand (dry-run only, nothing is changed).
 """
 
+import math
 import time
 from pathlib import Path
 
@@ -19,6 +20,12 @@ WINDOW_NAME = "Gesture Remote"
 # the image before detection, so its guess comes out backwards; True swaps it back.
 # Verified on this laptop: without the swap, the real right hand was labeled "Left".
 SWAP_HANDEDNESS = True
+
+# Landmark numbers from MediaPipe's list of 21 hand points.
+WRIST = 0
+THUMB_TIP = 4
+INDEX_TIP = 8
+MIDDLE_BASE = 9  # the knuckle where the middle finger joins the palm
 
 
 def create_hand_landmarker():
@@ -50,6 +57,29 @@ def real_hand_label(handedness):
     return label
 
 
+def pinch_ratio(landmarks, width, height):
+    """Thumb-to-index distance divided by hand size (wrist to middle-finger base).
+
+    Dividing by hand size keeps the ratio about the same whether your hand is
+    close to the camera or far away.
+    """
+    def distance(a, b):
+        # x and y are fractions of the image width/height, so convert to pixels first.
+        return math.hypot((a.x - b.x) * width, (a.y - b.y) * height)
+
+    hand_size = max(distance(landmarks[WRIST], landmarks[MIDDLE_BASE]), 1e-6)  # never divide by 0
+    return distance(landmarks[THUMB_TIP], landmarks[INDEX_TIP]) / hand_size
+
+
+def print_status(control_on, ratios):
+    """Print one status line, overwriting the previous one ("\\r" goes back to the line start)."""
+    def show(label):
+        return f"{ratios[label]:.2f}" if label in ratios else " -- "
+
+    state = "ON " if control_on else "OFF"
+    print(f"Control {state} | Right: {show('Right')} | Left: {show('Left')}   ", end="\r")
+
+
 def draw_label(frame, landmarks, label):
     """Write the hand's Left/Right label just above the hand."""
     height, width = frame.shape[:2]
@@ -72,6 +102,8 @@ def main():
 
     landmarker = create_hand_landmarker()
     last_timestamp_ms = -1
+    control_on = False  # control always starts OFF; space toggles it
+    print("DRY-RUN: nothing on your system will be changed. Space = ON/OFF, q = quit.")
     try:
         while True:
             ok, frame = camera.read()
@@ -91,17 +123,26 @@ def main():
             last_timestamp_ms = timestamp_ms
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
+            height, width = frame.shape[:2]
+            ratios = {}  # pinch ratio of each visible hand, e.g. {"Right": 0.85}
             # handedness[i] holds MediaPipe's guesses for hand i; the first is the best one.
             for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
+                label = real_hand_label(handedness)
+                ratios[label] = pinch_ratio(landmarks, width, height)
                 draw_hand(frame, landmarks)
-                draw_label(frame, landmarks, real_hand_label(handedness))
+                draw_label(frame, landmarks, f"{label} {ratios[label]:.2f}")
+
+            print_status(control_on, ratios)
 
             cv2.imshow(WINDOW_NAME, frame)
             key = cv2.waitKey(1) & 0xFF
+            if key == ord(" "):
+                control_on = not control_on
             # Stop on q, or when the window's X button is clicked.
             if key == ord("q") or cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
     finally:
+        print()  # move past the status line
         landmarker.close()
         camera.release()
         cv2.destroyAllWindows()
