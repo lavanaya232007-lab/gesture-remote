@@ -1,6 +1,7 @@
 """Gesture remote: control volume and brightness with hand gestures.
 
-Current step: right-hand pinch controls the volume (dry-run by default, --live to change it).
+Right-hand pinch controls the volume, left-hand pinch controls the screen brightness.
+Dry-run by default (changes nothing); add --live to really change them.
 """
 
 import argparse
@@ -10,11 +11,13 @@ from pathlib import Path
 
 import cv2
 import mediapipe as mp
+import screen_brightness_control as sbc
 from mediapipe.tasks.python import BaseOptions, vision
 from pycaw.pycaw import AudioUtilities
 
 # ---- Safety limits ----
 MAX_VOLUME = 0.70  # system volume never goes above this (0.0 = silent, 1.0 = 100%)
+MIN_BRIGHTNESS = 10  # screen brightness (percent) never goes below this, so it never goes dark
 
 # ---- Pinch calibration (see README for how to tune) ----
 PINCH_RATIO_MIN = 0.35  # this ratio or smaller = pinch closed = lowest level
@@ -24,9 +27,12 @@ PINCH_RATIO_MAX = 1.20  # this ratio or bigger = pinch open = highest level
 SMOOTHING = 0.2  # 0 to 1: how far to move toward the target each frame (lower = smoother, slower)
 VOLUME_MAX_STEP = 0.02  # biggest volume change allowed in one frame
 VOLUME_DEADBAND = 0.01  # volume changes smaller than this are ignored (stops flicker)
+BRIGHTNESS_MAX_STEP = 2  # biggest brightness change allowed in one frame (percent)
+BRIGHTNESS_DEADBAND = 1  # brightness changes smaller than this are ignored (percent)
 
 # ---- Other settings ----
 CAMERA_INDEX = 0  # 0 = the laptop's built-in webcam
+BRIGHTNESS_METHOD = "wmi"  # the Windows method for the built-in laptop screen
 MODEL_PATH = Path(__file__).parent / "models" / "hand_landmarker.task"
 WINDOW_NAME = "Gesture Remote"
 
@@ -136,15 +142,15 @@ class SmoothLevel:
         return new_level
 
 
-def print_status(control_on, ratios, volume):
+def print_status(control_on, ratios, volume, brightness):
     """Print one status line, overwriting the previous one ("\\r" goes back to the line start)."""
-    def show(value):
-        return " -- " if value is None else f"{value:.2f}"
+    def show(value, fmt=".2f"):
+        return " -- " if value is None else format(value, fmt)
 
     state = "ON " if control_on else "OFF"
     print(
-        f"Control {state} | Right: {show(ratios.get('Right'))} -> volume {show(volume)}"
-        f" | Left: {show(ratios.get('Left'))}   ",
+        f"Control {state} | Right {show(ratios.get('Right'))} -> volume {show(volume)}"
+        f" | Left {show(ratios.get('Left'))} -> brightness {show(brightness, '3.0f')}   ",
         end="\r",
     )
 
@@ -164,7 +170,7 @@ def parse_args():
     parser.add_argument(
         "--live",
         action="store_true",
-        help="really change the system volume (without this, it's a dry-run that changes nothing)",
+        help="really change the volume and screen brightness (without this, it's a dry-run that changes nothing)",
     )
     return parser.parse_args()
 
@@ -183,12 +189,14 @@ def main():
     # Windows' volume control for the default speakers (pycaw), using the 0.0-1.0 scale.
     volume_endpoint = AudioUtilities.GetSpeakers().EndpointVolume
     volume_control = SmoothLevel(0.0, MAX_VOLUME, VOLUME_MAX_STEP, VOLUME_DEADBAND)
+    brightness_control = SmoothLevel(MIN_BRIGHTNESS, 100, BRIGHTNESS_MAX_STEP, BRIGHTNESS_DEADBAND)
 
     landmarker = create_hand_landmarker()
     last_timestamp_ms = -1
     control_on = False  # control always starts OFF; space toggles it
     if args.live:
-        print("LIVE: when control is ON, your right hand really changes the system volume.")
+        print("LIVE: when control is ON, your right hand really changes the volume "
+              "and your left hand really changes the screen brightness.")
     else:
         print("DRY-RUN: nothing on your system will be changed (add --live to change it).")
     print("Space = control ON/OFF, q = quit.")
@@ -228,19 +236,37 @@ def main():
                 if new_volume is not None and args.live:
                     volume_endpoint.SetMasterVolumeLevelScalar(new_volume, None)
 
-            print_status(control_on, ratios, volume_control.level if control_on else None)
+            # Left hand controls the screen brightness the same way.
+            if control_on and "Left" in ratios:
+                target = pinch_to_level(ratios["Left"], MIN_BRIGHTNESS, 100)
+                new_brightness = brightness_control.update(target)
+                if new_brightness is not None and args.live:
+                    # Brightness is set in whole percents.
+                    sbc.set_brightness(round(new_brightness), method=BRIGHTNESS_METHOD)
+
+            print_status(
+                control_on,
+                ratios,
+                volume_control.level if control_on else None,
+                brightness_control.level if control_on else None,
+            )
 
             cv2.imshow(WINDOW_NAME, frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord(" "):
                 control_on = not control_on
                 if control_on:
-                    # Start from the real current volume so nothing jumps.
-                    current = volume_endpoint.GetMasterVolumeLevelScalar()
-                    volume_control.start(current)
-                    if current > MAX_VOLUME:
-                        print(f"\nVolume is {current:.2f}, above MAX_VOLUME ({MAX_VOLUME}): "
+                    # Start from the real current levels so nothing jumps.
+                    current_volume = volume_endpoint.GetMasterVolumeLevelScalar()
+                    volume_control.start(current_volume)
+                    if current_volume > MAX_VOLUME:
+                        print(f"\nVolume is {current_volume:.2f}, above MAX_VOLUME ({MAX_VOLUME}): "
                               "it will come down gradually.")
+                    current_brightness = sbc.get_brightness(method=BRIGHTNESS_METHOD)[0]
+                    brightness_control.start(current_brightness)
+                    if current_brightness < MIN_BRIGHTNESS:
+                        print(f"\nBrightness is {current_brightness}%, below MIN_BRIGHTNESS "
+                              f"({MIN_BRIGHTNESS}%): it will come up gradually.")
             # Stop on q, or when the window's X button is clicked.
             if key == ord("q") or cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
